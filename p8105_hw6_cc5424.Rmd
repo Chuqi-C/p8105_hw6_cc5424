@@ -2,7 +2,7 @@
 title: "p8105_hw6_cc5424"
 author: "ChuqiChen"
 date: "2025-12-03"
-output: html_document
+output: github_document
 ---
 #problem1
 ```{r}
@@ -180,95 +180,123 @@ The bootstrap distribution of β₁/β₂ exhibits a more pronounced right skew 
 
 #problem3
 ```{r}
+# Load packages
 library(tidyverse)
 library(modelr)
 library(broom)
+library(janitor)
 
-birth_df_raw <- read_csv("data/birthweight.csv")
-
-birth_df <- birth_df_raw %>%
+# Load and clean the data
+birthweight =
+  read_csv("./data/birthweight.csv") %>% 
   janitor::clean_names() %>% 
   mutate(
     babysex = factor(babysex, levels = c(1,2), labels = c("male","female")),
     frace   = factor(frace, levels = c(1,2,3,4,8,9),
-                     labels = c("white","black","asian","puerto_rican","other","unknown")),
-    mrace   = factor(mrace, levels = c(1,2,3,4,8),
-                     labels = c("white","black","asian","puerto_rican","other")),
+                     labels = c("White","Black","Asian","Puerto Rican","Other","Unknown")),
     malform = factor(malform, levels = c(0,1), labels = c("absent","present")),
-    parity  = as.numeric(parity)
+    mrace   = factor(mrace, levels = c(1,2,3,4,8),
+                     labels = c("White","Black","Asian","Puerto Rican","Other"))
   )
-```
 
-```{r}
-model_main <- lm(
-  bwt ~ gaweeks + bhead + blength + ppbmi + wtgain +
-    smoken + momage + mheight + fincome,
-  data = birth_df
-)
+# Check missing data
+sum(is.na(birthweight))
 
-summary(model_main)
-```
+# Main model (biology + parental characteristics)
+# NOTE: delwt = ppwt + wtgain  → wtgain is dropped due to collinearity
+bwt_reg =
+  lm(bwt ~ delwt + frace + mheight + momage + mrace + ppwt + wtgain,
+     data = birthweight)
 
-```{r}
-birth_df_resid <- birth_df %>%
-  add_predictions(model_main) %>%
-  add_residuals(model_main)
+summary(bwt_reg)
+broom::glance(bwt_reg)
+broom::tidy(bwt_reg)
 
-ggplot(birth_df_resid, aes(x = pred, y = resid)) +
+# Residuals vs Fitted Plot
+birthweight %>% 
+  add_predictions(bwt_reg) %>% 
+  add_residuals(bwt_reg) %>% 
+  ggplot(aes(x = pred, y = resid)) +
   geom_point(alpha = 0.4) +
-  geom_hline(yintercept = 0, color = "red") +
+  geom_hline(yintercept = 0, linetype = "dashed") +
   labs(
     title = "Residuals vs Fitted Values",
+    x = "Fitted Values",
+    y = "Residuals"
+  ) +
+  theme_minimal()
+
+# Comparison models
+
+# Model 1: blength + gaweeks (main effects only)
+reg_1 =
+  lm(bwt ~ blength + gaweeks, data = birthweight)
+
+# Model 2: Three-way interaction among bhead * blength * babysex
+reg_2 =
+  lm(bwt ~ bhead * blength * babysex, data = birthweight)
+
+# Compare model residuals visually
+birthweight %>% 
+  gather_predictions(bwt_reg, reg_1, reg_2) %>% 
+  gather_residuals(bwt_reg, reg_1, reg_2) %>% 
+  ggplot(aes(x = pred, y = resid)) +
+  geom_point(alpha = 0.4) +
+  facet_grid(~ model) +
+  labs(
+    title = "Model Residual Comparison",
     x = "Predicted birthweight",
     y = "Residuals"
   ) +
   theme_minimal()
-```
 
-```{r}
-model_length_ga <- lm(bwt ~ blength + gaweeks, data = birth_df)
-```
-
-```{r}
-model_big_interaction <- lm(
-  bwt ~ bhead * blength * babysex,
-  data = birth_df
-)
-```
-
-```{r}
+# Monte Carlo Cross-Validation (100 splits)
 set.seed(123)
 
-cv_df <- crossv_mc(birth_df, n = 10, test = 0.25)
-```
-
-```{r}
-cv_results <- cv_df %>%
+cv_df =
+  crossv_mc(birthweight, 100) %>% 
   mutate(
-    train = map(train, ~ as_tibble(.x)),
-    test  = map(test,  ~ as_tibble(.x)),
-    
-    fit_main  = map(train, ~ lm(
-      bwt ~ gaweeks + bhead + blength + ppbmi + wtgain +
-        smoken + momage + mheight + fincome,
-      data = .x)),
-    
-    fit_len   = map(train, ~ lm(bwt ~ blength + gaweeks, data = .x)),
-    
-    fit_inter = map(train, ~ lm(bwt ~ bhead * blength * babysex, data = .x)),
-    
-    rmse_main = map2_dbl(fit_main,  test, ~ rmse(model = .x, data = .y)),
-    rmse_len  = map2_dbl(fit_len,   test, ~ rmse(model = .x, data = .y)),
-    rmse_int  = map2_dbl(fit_inter, test, ~ rmse(model = .x, data = .y))
-  )
+    train = map(train, as_tibble),
+    test  = map(test, as_tibble)
+  ) %>% 
+  mutate(
+    # Fit all 3 models
+    bwt_reg = map(train,
+                  \(df) lm(bwt ~ delwt + frace + mheight + momage + mrace + ppwt + wtgain,
+                          data = df)),
+    reg_1   = map(train,
+                  \(df) lm(bwt ~ blength + gaweeks, data = df)),
+    reg_2   = map(train,
+                  \(df) lm(bwt ~ bhead * blength * babysex, data = df))
+  ) %>% 
+  mutate(
+    # Compute RMSE for each
+    rmse_bwt_reg = map2_dbl(bwt_reg, test, \(mod, df) rmse(model = mod, data = df)),
+    rmse_reg_1   = map2_dbl(reg_1,   test, \(mod, df) rmse(model = mod, data = df)),
+    rmse_reg_2   = map2_dbl(reg_2,   test, \(mod, df) rmse(model = mod, data = df))
+  ) %>% 
+  select(starts_with("rmse")) %>% 
+  pivot_longer(
+    everything(),
+    names_to = "model",
+    values_to = "rmse",
+    names_prefix = "rmse_"
+  ) %>% 
+  mutate(model = fct_inorder(model))
+
+# Cross-validation RMSE comparison plot
+cv_plot =
+  cv_df %>% 
+  ggplot(aes(x = model, y = rmse)) +
+  geom_violin(fill = "skyblue") +
+  labs(
+    title = "Cross-Validated Prediction Error Comparison",
+    x = "Models",
+    y = "RMSE"
+  ) +
+  theme_minimal()
+
+cv_plot
 ```
 
-```{r}
-cv_results %>%
-  summarize(
-    main_rmse = mean(rmse_main),
-    len_rmse  = mean(rmse_len),
-    int_rmse  = mean(rmse_int)
-  )
-```
 
