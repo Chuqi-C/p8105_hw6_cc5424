@@ -1,0 +1,274 @@
+---
+title: "p8105_hw6_cc5424"
+author: "ChuqiChen"
+date: "2025-12-03"
+output: html_document
+---
+#problem1
+```{r}
+library(tidyverse)
+library(broom)
+library(ggplot2)
+
+# 读入数据
+homicides <- readr::read_csv("https://raw.githubusercontent.com/washingtonpost/data-homicides/master/homicide-data.csv")
+
+# 创建 city_state
+homicides <- homicides %>%
+  mutate(city_state = paste(city, state, sep = ", "),
+         victim_age = as.numeric(victim_age),
+         solved = ifelse(disposition == "Closed by arrest", 1, 0))
+
+# 过滤掉指定城市 & 限制种族
+clean_dat <- homicides %>%
+  filter(!(city_state %in% c("Dallas, TX", "Phoenix, AZ", "Kansas City, MO", "Tulsa, AL"))) %>%
+  filter(victim_race %in% c("White", "Black"))
+```
+
+```{r}
+balt <- clean_dat %>% filter(city_state == "Baltimore, MD")
+
+fit_balt <- glm(
+  solved ~ victim_age + victim_sex + victim_race,
+  data = balt,
+  family = binomial
+)
+
+tidy_balt <- broom::tidy(fit_balt, conf.int = TRUE, exponentiate = TRUE)
+male_OR_balt <- tidy_balt %>% filter(term == "victim_sexMale")
+
+male_OR_balt
+```
+
+```{r}
+# 每个城市运行 glm
+models_by_city <- clean_dat %>%
+  nest(data = -city_state) %>%
+  mutate(
+    model = map(data, ~ glm(
+      solved ~ victim_age + victim_sex + victim_race,
+      data = .x,
+      family = binomial
+    )),
+    tidy = map(model, ~ broom::tidy(.x, conf.int = TRUE, exponentiate = TRUE))
+  ) %>%
+  select(city_state, tidy) %>%
+  unnest(tidy) %>%
+  filter(term == "victim_sexMale") %>%
+  arrange(estimate)
+```
+
+```{r}
+ggplot(models_by_city, aes(
+  x = reorder(city_state, estimate),
+  y = estimate,
+  ymin = conf.low,
+  ymax = conf.high
+)) +
+  geom_pointrange() +
+  coord_flip() +
+  geom_hline(yintercept = 1, linetype = "dashed", color = "red") +
+  labs(
+    title = "Adjusted OR of Solved Homicides: Male vs Female Victims",
+    x = "City",
+    y = "Adjusted Odds Ratio (Male vs Female)"
+  ) +
+  theme_minimal()
+```
+Overall Trends
+
+In many cities, the adjusted OR is below 1, indicating:
+Cases involving male victims are less likely to be solved than those involving female victims in these cities (after adjusting for age and race).
+
+Several cities show an OR significantly greater than 1 (e.g., Albuquerque, NM), suggesting:
+Cases involving male victims are more likely to be solved.
+
+Differences in Confidence Interval Width
+
+Some cities exhibit very wide confidence intervals (particularly those with smaller samples), indicating unstable estimates.
+
+Larger cities (e.g., Los Angeles, Chicago) have narrower CIs, suggesting more reliable estimates.
+
+Baltimore's Position
+
+Baltimore, MD's OR is significantly below 1 (approximately 0.7), indicating:
+In Baltimore, cases involving male victims are harder to solve, even after controlling for age and race.
+
+Significant Cross-City Variation
+
+ORs vary considerably across cities, indicating:
+Solving rates are influenced by structural factors such as city resources, judicial systems, and policing practices, not solely by victim characteristics.
+
+
+
+#problem2
+```{r}
+library(p8105.datasets)
+
+data("weather_df")
+```
+
+```{r}
+boot_sample <- function(df) {
+  df_boot <- df %>% sample_frac(replace = TRUE)
+  
+  fit <- lm(tmax ~ tmin + prcp, data = df_boot)
+  
+  r2 <- glance(fit)$r.squared
+  
+  coefs <- tidy(fit)
+  beta1 <- coefs %>% filter(term == "tmin") %>% pull(estimate)
+  beta2 <- coefs %>% filter(term == "prcp") %>% pull(estimate)
+  
+  ratio <- beta1 / beta2
+  
+  tibble(r2 = r2, ratio = ratio)
+}
+```
+
+```{r}
+set.seed(123)
+
+boot_results <- 
+  tibble(i = 1:5000) %>%
+  mutate(est = map(i, ~ boot_sample(weather_df))) %>%
+  unnest(est)
+```
+
+```{r}
+ggplot(boot_results, aes(x = r2)) +
+  geom_histogram(bins = 50, fill = "skyblue", color = "black") +
+  labs(
+    title = "Bootstrap Distribution of R-squared",
+    x = "R-squared",
+    y = "Count"
+  ) +
+  theme_minimal()
+```
+
+```{r}
+ggplot(boot_results, aes(x = ratio)) +
+  geom_histogram(bins = 50, fill = "orange", color = "black") +
+  labs(
+    title = "Bootstrap Distribution of β̂₁ / β̂₂",
+    x = "β̂₁ / β̂₂",
+    y = "Count"
+  ) +
+  theme_minimal()
+```
+
+```{r}
+boot_results %>% 
+  summarize(
+    r2_lower = quantile(r2, 0.025),
+    r2_upper = quantile(r2, 0.975)
+  )
+```
+
+```{r}
+boot_results %>% 
+  summarize(
+    ratio_lower = quantile(ratio, 0.025, na.rm = TRUE),
+    ratio_upper = quantile(ratio, 0.975, na.rm = TRUE)
+  )
+```
+The bootstrap distribution of R² is highly concentrated and approximately normal, with a mean around 0.94 and a very narrow distribution, indicating that the model fit remains highly stable during resampling.
+
+The bootstrap distribution of β₁/β₂ exhibits a more pronounced right skew and longer tails, suggesting that this ratio is relatively unstable, influenced by the small and highly variable prcp coefficient.
+
+
+
+#problem3
+```{r}
+library(tidyverse)
+library(modelr)
+library(broom)
+
+birth_df_raw <- read_csv("data/birthweight.csv")
+
+birth_df <- birth_df_raw %>%
+  janitor::clean_names() %>% 
+  mutate(
+    babysex = factor(babysex, levels = c(1,2), labels = c("male","female")),
+    frace   = factor(frace, levels = c(1,2,3,4,8,9),
+                     labels = c("white","black","asian","puerto_rican","other","unknown")),
+    mrace   = factor(mrace, levels = c(1,2,3,4,8),
+                     labels = c("white","black","asian","puerto_rican","other")),
+    malform = factor(malform, levels = c(0,1), labels = c("absent","present")),
+    parity  = as.numeric(parity)
+  )
+```
+
+```{r}
+model_main <- lm(
+  bwt ~ gaweeks + bhead + blength + ppbmi + wtgain +
+    smoken + momage + mheight + fincome,
+  data = birth_df
+)
+
+summary(model_main)
+```
+
+```{r}
+birth_df_resid <- birth_df %>%
+  add_predictions(model_main) %>%
+  add_residuals(model_main)
+
+ggplot(birth_df_resid, aes(x = pred, y = resid)) +
+  geom_point(alpha = 0.4) +
+  geom_hline(yintercept = 0, color = "red") +
+  labs(
+    title = "Residuals vs Fitted Values",
+    x = "Predicted birthweight",
+    y = "Residuals"
+  ) +
+  theme_minimal()
+```
+
+```{r}
+model_length_ga <- lm(bwt ~ blength + gaweeks, data = birth_df)
+```
+
+```{r}
+model_big_interaction <- lm(
+  bwt ~ bhead * blength * babysex,
+  data = birth_df
+)
+```
+
+```{r}
+set.seed(123)
+
+cv_df <- crossv_mc(birth_df, n = 10, test = 0.25)
+```
+
+```{r}
+cv_results <- cv_df %>%
+  mutate(
+    train = map(train, ~ as_tibble(.x)),
+    test  = map(test,  ~ as_tibble(.x)),
+    
+    fit_main  = map(train, ~ lm(
+      bwt ~ gaweeks + bhead + blength + ppbmi + wtgain +
+        smoken + momage + mheight + fincome,
+      data = .x)),
+    
+    fit_len   = map(train, ~ lm(bwt ~ blength + gaweeks, data = .x)),
+    
+    fit_inter = map(train, ~ lm(bwt ~ bhead * blength * babysex, data = .x)),
+    
+    rmse_main = map2_dbl(fit_main,  test, ~ rmse(model = .x, data = .y)),
+    rmse_len  = map2_dbl(fit_len,   test, ~ rmse(model = .x, data = .y)),
+    rmse_int  = map2_dbl(fit_inter, test, ~ rmse(model = .x, data = .y))
+  )
+```
+
+```{r}
+cv_results %>%
+  summarize(
+    main_rmse = mean(rmse_main),
+    len_rmse  = mean(rmse_len),
+    int_rmse  = mean(rmse_int)
+  )
+```
+
